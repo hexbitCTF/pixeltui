@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -93,57 +95,98 @@ var (
 	gradB    = "#F25D94"
 )
 
-// Fixed semantic colors.
+// Semantic colors. Presets share one fixed set; the "system" theme replaces
+// them with the desktop palette's own, so warnings, errors and borders stay in
+// the theme's colors instead of pixeltui's.
 var (
-	cText   = ac("236", "252")
-	cDim    = ac("245", "243")
-	cGreen  = ac("28", "84")
-	cYellow = ac("136", "221")
-	cRed    = ac("160", "203")
-	cBorder = ac("250", "238")
+	cText    = presetText
+	cDim     = presetDim
+	cGreen   = presetGreen
+	cYellow  = presetYellow
+	cRed     = presetRed
+	cBorder  = presetBorder
+	cSelText = presetSelText
 )
 
-// Accent-dependent styles (rebuilt by applyTheme); the rest are constant.
+// The preset semantic set, restored whenever a preset theme is applied.
+var (
+	presetText    = ac("236", "252")
+	presetDim     = ac("245", "243")
+	presetGreen   = ac("28", "84")
+	presetYellow  = ac("136", "221")
+	presetRed     = ac("160", "203")
+	presetBorder  = ac("250", "238")
+	presetSelText = ac("231", "231")
+)
+
+// Every themed style; all are rebuilt by applyTheme.
 var (
 	stTitle     lipgloss.Style
 	stNowTitle  lipgloss.Style
 	stSelBar    lipgloss.Style
 	stPaneFocus lipgloss.Style
-
-	stDim     = lipgloss.NewStyle().Foreground(cDim)
-	stGreen   = lipgloss.NewStyle().Foreground(cGreen)
-	stGreenB  = lipgloss.NewStyle().Foreground(cGreen).Bold(true)
-	stYellow  = lipgloss.NewStyle().Foreground(cYellow)
-	stRed     = lipgloss.NewStyle().Foreground(cRed)
-	stText    = lipgloss.NewStyle().Foreground(cText)
-	stArtist  = lipgloss.NewStyle().Foreground(cDim)
-	stSelText = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Bold(true)
-	stPane    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBorder)
+	stDim       lipgloss.Style
+	stGreen     lipgloss.Style
+	stGreenB    lipgloss.Style
+	stYellow    lipgloss.Style
+	stRed       lipgloss.Style
+	stText      lipgloss.Style
+	stArtist    lipgloss.Style
+	stSelText   lipgloss.Style
+	stPane      lipgloss.Style
 )
 
 func init() { applyTheme("default") }
 
-// applyTheme switches the accent palette and rebuilds accent-dependent styles.
-// Unknown names fall back to "default".
+// applyTheme switches the palette and rebuilds every themed style.
+//
+// Unknown names fall back to "default". The "system" theme is not in the
+// preset registry: it is read from the desktop palette on each call, which is
+// what makes a live theme switch a matter of calling this again. If that
+// palette cannot be read, the preset colors stand rather than an error.
 func applyTheme(name string) {
+	cText, cDim = presetText, presetDim
+	cGreen, cYellow, cRed = presetGreen, presetYellow, presetRed
+	cBorder, cSelText = presetBorder, presetSelText
+
 	t, ok := themes[name]
 	if !ok {
 		t = themes["default"]
 	}
+	if name == SystemThemeName {
+		if sys, err := loadSystemTheme(); err == nil {
+			t = sys.def
+			cText, cDim = sys.text, sys.dim
+			cGreen, cYellow, cRed = sys.green, sys.yellow, sys.red
+			cBorder, cSelText = sys.border, sys.selText
+		}
+	}
+
 	cAccent, cAccent2, cBorderA = t.accent, t.accent2, t.accent
 	gradA, gradB = t.grad1, t.grad2
+
 	stTitle = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
 	stNowTitle = lipgloss.NewStyle().Foreground(cAccent2).Bold(true)
 	stSelBar = lipgloss.NewStyle().Foreground(cAccent)
 	stPaneFocus = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBorderA)
+	stDim = lipgloss.NewStyle().Foreground(cDim)
+	stGreen = lipgloss.NewStyle().Foreground(cGreen)
+	stGreenB = lipgloss.NewStyle().Foreground(cGreen).Bold(true)
+	stYellow = lipgloss.NewStyle().Foreground(cYellow)
+	stRed = lipgloss.NewStyle().Foreground(cRed)
+	stText = lipgloss.NewStyle().Foreground(cText)
+	stArtist = lipgloss.NewStyle().Foreground(cDim)
+	stSelText = lipgloss.NewStyle().Foreground(cSelText).Bold(true)
+	stPane = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBorder)
 }
 
 // ThemeNames returns the available theme names (sorted), for setup/help.
 func ThemeNames() []string {
-	out := make([]string, 0, len(themes))
+	out := make([]string, 0, len(themes)+1)
 	for n := range themes {
 		out = append(out, n)
 	}
+	out = append(out, SystemThemeName) // not a preset, so not in the registry
 	sort.Strings(out)
 	return out
 }
@@ -802,6 +845,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
 		return m, nil
+
+	case themeReloadMsg:
+		// The desktop palette changed. Only the system theme tracks it; on a
+		// preset this is a no-op rather than a surprise recolor.
+		if m.themeName != SystemThemeName {
+			return m, nil
+		}
+		applyTheme(m.themeName)
+		// The seek bar's gradient is baked into the progress model at
+		// construction, so it needs rebuilding to pick up the new accents.
+		width := m.prog.Width
+		m.prog = progress.New(progress.WithGradient(gradA, gradB), progress.WithoutPercentage())
+		m.prog.Width = width
+		return m, m.prog.SetPercent(m.ratio())
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -4351,6 +4408,19 @@ func Run(cfg Config) {
 
 	m := newModel(cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen())
+
+	// Follow the desktop palette while the UI is up. The watcher runs whatever
+	// theme is selected, because the theme can be switched to "system" from the
+	// settings pane mid-session; Update ignores the message on a preset.
+	//
+	// SIGUSR1 only, deliberately: it lets a theme hook make the change instant
+	// instead of waiting out the poll, while leaving SIGHUP to mean what it
+	// normally means -- the terminal went away and pixeltui should exit.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGUSR1)
+	defer signal.Stop(sig)
+	watchSystemTheme(p, sig)
+
 	final, err := p.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
