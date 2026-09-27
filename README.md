@@ -311,11 +311,54 @@ Every value can also be set by environment variable (env wins over the file):
 | `PIXELTUI_SUBSONIC_URL` / `_USER` / `_PASS` | Subsonic/Navidrome server |
 | `PIXELTUI_LOCAL_DIRS` | local music folders (PATH-style list) |
 | `PIXELTUI_DOWNLOAD_DIR` | where downloads are saved |
-| `PIXELTUI_THEME` | accent theme (default · ocean · matrix · amber · rose · mono) |
+| `PIXELTUI_THEME` | accent theme (default · ocean · matrix · amber · rose · mono · system) |
+| `PIXELTUI_THEME_FILE` | palette the `system` theme follows (see [Themes](#themes)) |
 | `PIXELTUI_SERVE_ADDR` / `_URL` / `_TUNNEL` | `pixeltui serve` bind address / public URL / tunnel |
 | `PIXELTUI_YTDLP` / `PIXELTUI_MPV` | override the yt-dlp / mpv binary path |
 
 The config file is written `0600` since it can hold a password.
+
+### Themes
+
+Six presets — `default`, `ocean`, `matrix`, `amber`, `rose`, `mono` — set the
+two accent colors. Cycle them live in the settings pane (`,`).
+
+A seventh, `system`, takes its colors from the desktop theme instead of a
+preset, and keeps following it: change the desktop theme and the running UI
+recolors in place, without a restart or a gap in playback. Unlike the presets,
+it also themes the semantic colors — text, dim, borders, and the green/yellow/
+red used for status.
+
+It reads a flat `key = "#rrggbb"` palette from
+
+```
+$XDG_STATE_HOME/hexarchy/current/theme/colors.toml
+```
+
+which is what [Hexarchy](https://github.com/hexbit/hexarchy) rewrites on every
+theme change. Point `PIXELTUI_THEME_FILE` at any file in that format to use a
+different palette — or to wire up a desktop that writes its palette elsewhere.
+These keys are used, and each falls back to a value derived from the
+background/foreground ramp when absent:
+
+| Key | Used for |
+|-----|----------|
+| `accent` | headers, selection bar, focused pane border |
+| `magenta` / `cyan` / `blue` / `green` | the companion accent — first one whose hue is at least 30° off `accent` |
+| `foreground` / `bright_foreground` | body text · selected row |
+| `dark_foreground` / `muted` | dimmed text · borders |
+| `green` / `yellow` / `red` | status colors |
+
+The palette is polled once a second; `SIGUSR1` forces an immediate re-read, so
+a theme hook can make the switch instant:
+
+```bash
+# ~/.config/hexarchy/hooks/theme-set.d/pixeltui
+pkill -USR1 -x pixeltui
+```
+
+If the palette cannot be read, the preset colors stand — a missing or partial
+file degrades rather than failing.
 
 ---
 

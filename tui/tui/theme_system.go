@@ -285,33 +285,40 @@ func paletteStamp() (string, bool) {
 var watchOnce sync.Once
 
 // watchSystemTheme nudges the program whenever the desktop palette changes.
-//
-// Polling rather than inotify: the file is rewritten (not edited in place) by
-// `hexarchy theme set`, which replaces the inode and would silently break a
-// watch on the original file. A 1s poll of one stat() is cheap, survives the
-// replacement, and keeps the binary dependency-free.
-//
-// A SIGHUP/SIGUSR1 handler is installed alongside it by the caller, so a theme
-// hook can make the change instant instead of waiting out the poll.
+// It is a no-op after the first call.
 func watchSystemTheme(p *tea.Program, sig <-chan os.Signal) {
 	watchOnce.Do(func() {
-		go func() {
-			last, _ := paletteStamp()
-			tick := time.NewTicker(time.Second)
-			defer tick.Stop()
-			for {
-				select {
-				case <-tick.C:
-					stamp, ok := paletteStamp()
-					if !ok || stamp == last {
-						continue
-					}
-					last = stamp
-				case <-sig:
-					last, _ = paletteStamp()
-				}
-				p.Send(themeReloadMsg{})
-			}
-		}()
+		go paletteWatchLoop(p.Send, sig, nil, time.Second)
 	})
+}
+
+// paletteWatchLoop sends a themeReloadMsg every time the palette file changes,
+// and whenever a signal arrives.
+//
+// Polling rather than inotify: the file is replaced (not edited in place) by
+// `hexarchy theme set`, which swaps the inode and would silently break a watch
+// on the original file. One stat() per second is cheap, survives replacement,
+// and keeps the binary dependency-free. The signal path exists so a theme hook
+// can make the change instant instead of waiting out the poll.
+func paletteWatchLoop(send func(tea.Msg), sig <-chan os.Signal, done <-chan struct{}, every time.Duration) {
+	last, _ := paletteStamp()
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick.C:
+			stamp, ok := paletteStamp()
+			if !ok || stamp == last {
+				continue
+			}
+			last = stamp
+		case <-sig:
+			// Re-stamp so the poll that follows does not fire a second time
+			// for the change the signal already reported.
+			last, _ = paletteStamp()
+		}
+		send(themeReloadMsg{})
+	}
 }
