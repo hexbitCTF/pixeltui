@@ -1,14 +1,19 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
 	"image/color"
 	_ "image/jpeg"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/ansi/kitty"
 )
 
 // fetchImage downloads and decodes an image URL (jpeg/png).
@@ -28,14 +33,20 @@ func fetchImage(url string) (image.Image, error) {
 	return img, err
 }
 
-// renderArt downloads an image from artURL, resizes it to cols×(rows*2) pixels
-// using nearest-neighbor interpolation (stdlib only, no external deps), then
-// renders each 2-pixel-tall column pair as the Unicode UPPER HALF BLOCK "▀"
-// with 24-bit ANSI fg color (top pixel) and bg color (bottom pixel).
-//
-// Returns `rows` strings; each has `cols` visual characters but is longer in
-// bytes due to ANSI escape codes. On any error returns nil, err.
+// renderArt renders artURL into `rows` strings of `cols` visual characters,
+// suitable for dropping straight into the lipgloss layout that reserves that
+// cell grid. Terminals that advertise the kitty graphics protocol get a real
+// raster image (via Unicode placeholders); everything else falls back to the
+// half-block ANSI renderer.
 func renderArt(artURL string, cols, rows int) ([]string, error) {
+	if supportsKittyGraphics() {
+		if lines, err := renderArtKitty(artURL, cols, rows); err == nil {
+			return lines, nil
+		}
+		// fall through to the half-block renderer on any kitty-path error
+		// (network hiccup, decode failure, etc.)
+	}
+
 	src, err := fetchImage(artURL)
 	if err != nil {
 		return nil, err
@@ -54,6 +65,103 @@ func renderArt(artURL string, cols, rows int) ([]string, error) {
 			sb.WriteString(ansiBlock(top, bot))
 		}
 		lines[row] = sb.String()
+	}
+	return lines, nil
+}
+
+// kittyArtImageID is a single reused image slot: each new track deletes
+// whatever art was last stored there before transmitting the next one, so
+// browsing many tracks doesn't leak images into the terminal's cache.
+const kittyArtImageID = 1001
+
+// supportsKittyGraphics reports whether the current terminal advertises the
+// kitty graphics protocol (kitty itself, and the other terminals — WezTerm,
+// Ghostty — that implement the same protocol).
+func supportsKittyGraphics() bool {
+	if os.Getenv("KITTY_WINDOW_ID") != "" {
+		return true
+	}
+	if strings.Contains(os.Getenv("TERM"), "kitty") {
+		return true
+	}
+	switch os.Getenv("TERM_PROGRAM") {
+	case "WezTerm", "ghostty":
+		return true
+	}
+	return false
+}
+
+// renderArtKitty renders artURL as a real raster image using the kitty
+// graphics protocol's Unicode placeholder mode: the image is transmitted
+// once, then displayed by printing `cols`×`rows` placeholder runes (each
+// tagged with a row/column diacritic and a foreground color that encodes the
+// image id). Those placeholder cells behave like ordinary text as far as
+// lipgloss/bubbletea layout and redraws are concerned, but kitty renders the
+// actual image over them — so this drops straight into the same grid the
+// half-block renderer occupies, at full resolution instead of one cell per
+// two source pixels.
+func renderArtKitty(artURL string, cols, rows int) ([]string, error) {
+	src, err := fetchImage(artURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var out strings.Builder
+
+	del := kitty.Options{
+		Action:          kitty.Delete,
+		Delete:          kitty.DeleteID,
+		ID:              kittyArtImageID,
+		DeleteResources: true,
+		Quite:           2,
+	}
+	out.WriteString(ansi.KittyGraphics(nil, del.Options()...))
+
+	tx := &kitty.Options{
+		Action:       kitty.Transmit,
+		Format:       kitty.PNG,
+		ID:           kittyArtImageID,
+		Transmission: kitty.Direct,
+		Chunk:        true,
+		Quite:        2,
+	}
+	var payload bytes.Buffer
+	if err := kitty.EncodeGraphics(&payload, src, tx); err != nil {
+		return nil, err
+	}
+	out.WriteString(payload.String())
+
+	put := kitty.Options{
+		Action:           kitty.Put,
+		ID:               kittyArtImageID,
+		PlacementID:      1,
+		VirtualPlacement: true,
+		Columns:          cols,
+		Rows:             rows,
+		Quite:            2,
+	}
+	out.WriteString(ansi.KittyGraphics(nil, put.Options()...))
+
+	fg := fmt.Sprintf("\x1b[38;2;%d;%d;%dm",
+		(kittyArtImageID>>16)&0xFF, (kittyArtImageID>>8)&0xFF, kittyArtImageID&0xFF)
+
+	lines := make([]string, rows)
+	for r := 0; r < rows; r++ {
+		var sb strings.Builder
+		if r == 0 {
+			// The transmit/put control sequences carry no visible width; they
+			// only need to reach the terminal once, so they ride along on
+			// the first line rather than needing a row of their own.
+			sb.WriteString(out.String())
+		}
+		sb.WriteString(fg)
+		for c := 0; c < cols; c++ {
+			sb.WriteRune(kitty.Placeholder)
+			sb.WriteRune(kitty.Diacritic(r))
+			sb.WriteRune(kitty.Diacritic(c))
+		}
+		sb.WriteString("\x1b[0m")
+		lines[r] = sb.String()
 	}
 	return lines, nil
 }
