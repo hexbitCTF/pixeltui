@@ -96,6 +96,7 @@ func entriesToCandidates(list []idxEntry) []engine.Candidate {
 		out[i] = engine.Candidate{
 			Track: e.Title, Artist: e.Artist, Album: e.Album, DurationSec: e.Dur,
 			Source: Source, StreamURL: e.Path, // player opens the path directly
+			ArtURL: ArtRef(e.Path), // cover resolved on demand, see art.go
 		}
 	}
 	return out
@@ -175,11 +176,36 @@ func fromFilename(path string) (artist, title string) {
 }
 
 // ffprobeFormat mirrors the slice of ffprobe -show_format JSON we care about.
+// Streams are read too because Ogg/Opus -- which is exactly what this program's
+// own downloader produces -- carries its Vorbis comments on the stream and
+// leaves the format block empty.
 type ffprobeFormat struct {
 	Format struct {
 		Duration string            `json:"duration"`
 		Tags     map[string]string `json:"tags"`
 	} `json:"format"`
+	Streams []struct {
+		Tags map[string]string `json:"tags"`
+	} `json:"streams"`
+}
+
+// tag looks a key up in the format tags first, then the stream tags. ffprobe
+// reports the same logical tag at different levels depending on the container:
+// an MP3 puts ID3 in format.tags, while an Ogg Opus file puts its Vorbis
+// comments in streams[0].tags and reports format.tags as {}. Reading only the
+// format level therefore made every freshly downloaded track look untagged --
+// no artist, no title, and with a bare filename no artist could be recovered
+// from the name either.
+func (f *ffprobeFormat) tag(keys ...string) string {
+	if v := firstTag(f.Format.Tags, keys...); v != "" {
+		return v
+	}
+	for _, s := range f.Streams {
+		if v := firstTag(s.Tags, keys...); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // probe runs ffprobe (if on PATH) with a short timeout and parses tags.
@@ -193,7 +219,7 @@ func probe(path string) (artist, title, album string, dur int, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "quiet", "-print_format", "json", "-show_format", path)
+		"-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path)
 	data, err := cmd.Output()
 	if err != nil {
 		return "", "", "", 0, false
@@ -202,9 +228,9 @@ func probe(path string) (artist, title, album string, dur int, ok bool) {
 	if json.Unmarshal(data, &f) != nil {
 		return "", "", "", 0, false
 	}
-	title = firstTag(f.Format.Tags, "title", "TITLE")
-	artist = firstTag(f.Format.Tags, "artist", "ARTIST", "album_artist", "ALBUM_ARTIST")
-	album = firstTag(f.Format.Tags, "album", "ALBUM")
+	title = f.tag("title", "TITLE")
+	artist = f.tag("artist", "ARTIST", "album_artist", "ALBUM_ARTIST", "albumartist", "ALBUMARTIST")
+	album = f.tag("album", "ALBUM")
 	if s := strings.TrimSpace(f.Format.Duration); s != "" {
 		if v, err := strconv.ParseFloat(s, 64); err == nil {
 			dur = int(v)
