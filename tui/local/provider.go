@@ -19,12 +19,18 @@ import (
 type Provider struct {
 	dataDir string
 	dirs    []string
+	art     *Resolver
 }
 
 // NewProvider builds a local-file provider. dataDir is used for the metadata
-// index cache; dirs are the folders to scan.
-func NewProvider(dataDir string, dirs []string) *Provider {
-	return &Provider{dataDir: dataDir, dirs: dirs}
+// and album-art caches; dirs are the folders to scan. lastfmKey may be empty,
+// in which case cover art is looked for on disk only.
+func NewProvider(dataDir string, dirs []string, lastfmKey string) *Provider {
+	return &Provider{
+		dataDir: dataDir,
+		dirs:    dirs,
+		art:     NewResolver(dataDir, lastfmKey),
+	}
 }
 
 func (p *Provider) Key() string   { return "local" }
@@ -97,13 +103,24 @@ func (p *Provider) ResolveStream(ctx context.Context, id string) (string, error)
 	return "", source.ErrNotSupported
 }
 
-// ArtURL implements source.Provider. Local art is extracted on demand by the
-// server; this returns an empty URL so the server uses /api/art?id=lo:...
+// ArtURL implements source.Provider. It returns an unresolved local reference
+// (see ArtRef): the cover is found and cached on first use, and the HTTP server
+// serves it from /api/art?id=lo:… rather than from a URL the client can reach
+// directly.
 func (p *Provider) ArtURL(ctx context.Context, id string) (string, error) {
-	return "", nil
+	path, err := base64.URLEncoding.DecodeString(id)
+	if err != nil {
+		return "", err
+	}
+	if !p.allowed(string(path)) {
+		return "", fmt.Errorf("local file outside configured directories")
+	}
+	return ArtRef(string(path)), nil
 }
 
-// TrackInfo implements source.Provider.
+// TrackInfo implements source.Provider. ArtURL is deliberately left empty:
+// the value would be an unresolvable local: reference, and the HTTP surface
+// serves local covers through /api/art?id=lo:… instead.
 func (p *Provider) TrackInfo(ctx context.Context, id string) (source.TrackInfo, error) {
 	path, err := base64.URLEncoding.DecodeString(id)
 	if err != nil {
@@ -121,6 +138,10 @@ func (p *Provider) TrackInfo(ctx context.Context, id string) (source.TrackInfo, 
 	}, nil
 }
 
+// Resolver returns the provider's album-art resolver, so the TUI, the player
+// and the server share one cache instead of each re-extracting the same covers.
+func (p *Provider) Resolver() *Resolver { return p.art }
+
 // Capabilities implements source.Provider.
 func (p *Provider) Capabilities(ctx context.Context, id string) (source.Capabilities, error) {
 	return source.Capabilities{
@@ -129,7 +150,7 @@ func (p *Provider) Capabilities(ctx context.Context, id string) (source.Capabili
 		GoToAlbum:    false,
 		Radio:        false,
 		Download:     true,
-		Lyrics:       false,
+		Lyrics:       true,
 		ShareURL:     "",
 	}, nil
 }

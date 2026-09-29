@@ -2937,8 +2937,9 @@ func (m model) toggleLyrics() (tea.Model, tea.Cmd) {
 		m.showLyrics = false
 		return m, nil
 	}
-	// LRCLIB matches on artist/track, but the provider must advertise lyrics
-	// support before we try (local tracks, for example, may not want a lookup).
+	// The lyrics providers match on artist/track (with album and duration to
+	// disambiguate) and never touch a source id, so this works for local files
+	// and Subsonic as well as YouTube -- as long as we know who sang it.
 	if m.now == nil || (m.nowC.Track == "" && m.nowC.Artist == "") {
 		m.status = "Play a track to see its lyrics"
 		m.isErr = false

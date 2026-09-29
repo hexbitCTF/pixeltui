@@ -92,7 +92,7 @@ func (p *Provider) Capabilities(ctx context.Context, id string) (source.Capabili
 		GoToAlbum:    false,
 		Radio:        false,
 		Download:     true,
-		Lyrics:       false,
+		Lyrics:       true,
 		ShareURL:     "",
 	}, nil
 }
