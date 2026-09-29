@@ -579,6 +579,12 @@ type model struct {
 	actionsTrack  engine.Candidate
 
 	art []string
+	// artBlock is art pre-laid-out for display. Built once per track in the
+	// artMsg handler rather than in View: on the kitty graphics path art holds
+	// a base64 image payload of a few hundred KB, and measuring/wrapping that
+	// through lipgloss on every frame made key handling crawl. View runs at the
+	// spinner's frame rate, so it must only read a prebuilt string.
+	artBlock string
 
 	status string
 	isErr  bool
@@ -886,6 +892,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.st.nowKey = ""
 			m.position, m.duration, m.paused = 0, 0, false
 			m.art = nil
+			m.artBlock = ""
 			switch m.repeat {
 			case repeatOne:
 				return m, m.replay(ended) // loop the same track
@@ -903,6 +910,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.st.nowKey = ""
 			m.position, m.duration = 0, 0
 			m.art = nil
+			m.artBlock = ""
 			m.status = "Sleep timer — stopped"
 			m.isErr = false
 			return m, nil
@@ -951,6 +959,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.duration = float64(msg.c.DurationSec)
 		m.paused = false
 		m.art = nil
+		m.artBlock = ""
 		m.status = ""
 		m.isErr = false
 		m.lyricsSynced = nil // belongs to the previous track
@@ -1223,6 +1232,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case artMsg:
 		m.art = []string(msg)
+		m.artBlock = renderArtBlock(m.art)
 		m.layout() // recompute seek-bar width now that art occupies a column
 		return m, nil
 
@@ -3098,6 +3108,7 @@ func (m *model) gaplessAdvanced() tea.Cmd {
 	m.duration = float64(next.DurationSec)
 	m.paused, m.st.paused = false, false
 	m.art = nil
+	m.artBlock = ""
 	m.lyricsSynced = nil
 	m.status = ""
 	m.isErr = false
@@ -3432,6 +3443,19 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// renderArtBlock lays the art lines out into the block the now-playing bar
+// shows. Called once per track, never per frame: on the kitty graphics path the
+// art lines carry the whole image as a chunked base64 payload (a few hundred KB
+// for a normal cover), and lipgloss has to walk every byte of it to measure and
+// wrap it. Doing that at the spinner's frame rate made j/k feel like treacle and
+// left the terminal repainting garbage.
+func renderArtBlock(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return lipgloss.NewStyle().Width(artCols).Render(strings.Join(lines, "\n"))
 }
 
 func (m model) artWidth() int {
@@ -4077,8 +4101,8 @@ func (m model) viewNowBar() string {
 
 	content := info
 	if m.now != nil && m.art != nil {
-		artBlock := lipgloss.NewStyle().Width(artCols).Render(strings.Join(m.art, "\n"))
-		content = lipgloss.JoinHorizontal(lipgloss.Top, artBlock, "  ", info)
+		// Pre-laid-out in renderArtBlock; do not rebuild it here.
+		content = lipgloss.JoinHorizontal(lipgloss.Top, m.artBlock, "  ", info)
 	}
 
 	return lipgloss.NewStyle().
