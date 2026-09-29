@@ -34,7 +34,15 @@ func IsAudio(path string) bool {
 
 // indexVersion invalidates cached entries when the extracted fields change
 // (v2 added Album and durations for untagged files).
-const indexVersion = 2
+//
+// v3: probe() learned to read ffprobe's stream-level tags, so Ogg/Opus files --
+// which is what this program's own downloader produces -- stop being recorded
+// with an empty artist and album. Entries written at v2 still carry v2, so each
+// one is re-probed once on the next scan and the correct values replace them.
+// Without this bump the fix in probe() would never reach an existing library:
+// Scan reuses an entry whenever the mtime is unchanged, and downloaded files do
+// not change mtime when the reader improves.
+const indexVersion = 3
 
 // idxEntry is one cached file record (keyed by absolute path) persisted to
 // <dataDir>/local-index.json so re-scans can skip ffprobe for unchanged files.
