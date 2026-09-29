@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,6 +37,8 @@ type Stream struct {
 	ended     <-chan struct{}
 	media     <-chan MediaCmd // OS/hardware transport commands (mpv only)
 	mediaStop func()          // tears down the media reader
+
+	stopOnce sync.Once // Stop closes mediaStop's channel, so it must run once
 }
 
 // Attach wraps an already-running mpv IPC socket as a controllable Stream
@@ -65,26 +68,34 @@ func (s *Stream) CanControl() bool {
 }
 
 // Stop kills the player (and any yt-dlp feeder) and cleans up the IPC socket.
+//
+// It is safe to call more than once. mediaStop closes a channel, so a second
+// call used to panic with "close of closed channel" -- and it did in practice:
+// Run() returns once the player ends, and the deferred fm.now.Stop() in
+// cmdRecommend then stopped an already-stopped stream. A plain repeated call
+// (a UI that tears down on both quit and error) hit it too.
 func (s *Stream) Stop() {
 	if s == nil {
 		return
 	}
-	if s.mediaStop != nil {
-		s.mediaStop()
-	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		s.cmd.Process.Kill() //nolint:errcheck
-	}
-	if s.ended != nil {
-		<-s.ended
-	}
-	if s.dl != nil && s.dl.Process != nil {
-		s.dl.Process.Kill() //nolint:errcheck
-		s.dl.Wait()         //nolint:errcheck
-	}
-	if s.socket != "" {
-		removeIPC(s.socket)
-	}
+	s.stopOnce.Do(func() {
+		if s.mediaStop != nil {
+			s.mediaStop()
+		}
+		if s.cmd != nil && s.cmd.Process != nil {
+			s.cmd.Process.Kill() //nolint:errcheck
+		}
+		if s.ended != nil {
+			<-s.ended
+		}
+		if s.dl != nil && s.dl.Process != nil {
+			s.dl.Process.Kill() //nolint:errcheck
+			s.dl.Wait()         //nolint:errcheck
+		}
+		if s.socket != "" {
+			removeIPC(s.socket)
+		}
+	})
 }
 
 // Media returns the channel of OS/hardware transport commands (nil for a
